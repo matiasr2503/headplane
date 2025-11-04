@@ -1,14 +1,15 @@
+import { join } from 'node:path';
 import { env, versions } from 'node:process';
-import type { UpgradeWebSocket } from 'hono/ws';
 import { createHonoServer } from 'react-router-hono-server/node';
-import type { WebSocket } from 'ws';
 import log from '~/utils/log';
 import { configureConfig, configureLogger, envVariables } from './config/env';
+import { loadIntegration } from './config/integration';
 import { loadConfig } from './config/loader';
+import { createDbClient } from './db/client.server';
 import { createApiClient } from './headscale/api-client';
 import { loadHeadscaleConfig } from './headscale/config-loader';
-import { loadAgentSocket } from './web/agent';
-import { createOidcClient } from './web/oidc';
+import { createHeadplaneAgent } from './hp-agent';
+import { configureOidcAuth } from './web/oidc';
 import { createSessionStorage } from './web/sessions';
 
 declare global {
@@ -28,23 +29,42 @@ const config = await loadConfig(
 	}),
 );
 
+const db = await createDbClient(join(config.server.data_path, 'hp_persist.db'));
+const agents = await createHeadplaneAgent(
+	config.integration?.agent,
+	config.headscale.url,
+	db,
+);
+
 // We also use this file to load anything needed by the react router code.
 // These are usually per-request things that we need access to, like the
 // helper that can issue and revoke cookies.
 export type LoadContext = typeof appLoadContext;
+
+import 'react-router';
+declare module 'react-router' {
+	interface AppLoadContext extends LoadContext {}
+}
+
 const appLoadContext = {
 	config,
 	hs: await loadHeadscaleConfig(
 		config.headscale.config_path,
 		config.headscale.config_strict,
+		config.headscale.dns_records_path,
 	),
 
 	// TODO: Better cookie options in config
-	sessions: createSessionStorage({
-		name: '_hp_session',
-		maxAge: 60 * 60 * 24, // 24 hours
-		secure: config.server.cookie_secure,
-		secrets: [config.server.cookie_secret],
+	sessions: await createSessionStorage({
+		secret: config.server.cookie_secret,
+		db,
+		oidcUsersFile: config.oidc?.user_storage_file,
+		cookie: {
+			name: '_hp_auth',
+			secure: config.server.cookie_secure,
+			maxAge: config.server.cookie_max_age,
+			domain: config.server.cookie_domain,
+		},
 	}),
 
 	client: await createApiClient(
@@ -52,13 +72,10 @@ const appLoadContext = {
 		config.headscale.tls_cert_path,
 	),
 
-	agents: await loadAgentSocket(
-		config.server.agent.authkey,
-		config.server.agent.cache_path,
-		config.server.agent.ttl,
-	),
-
-	oidc: config.oidc ? await createOidcClient(config.oidc) : undefined,
+	agents,
+	integration: await loadIntegration(config.integration),
+	oidc: config.oidc ? await configureOidcAuth(config.oidc) : undefined,
+	db,
 };
 
 declare module 'react-router' {
@@ -66,10 +83,21 @@ declare module 'react-router' {
 }
 
 export default createHonoServer({
-	useWebSocket: true,
 	overrideGlobalObjects: true,
 	port: config.server.port,
 	hostname: config.server.host,
+	beforeAll: async (app) => {
+		app.use(__PREFIX__, async (c) => {
+			return c.redirect(`${__PREFIX__}/`);
+		});
+	},
+	serveStaticOptions: {
+		clientAssets: {
+			// This is part of our monkey-patch for react-router-hono-server
+			// To see the first part, go to the patches/ directory.
+			rewriteRequestPath: (path) => path.replace(`${__PREFIX__}`, ''),
+		},
+	},
 
 	// Only log in development mode
 	defaultLogger: import.meta.env.DEV,
@@ -80,21 +108,17 @@ export default createHonoServer({
 		return appLoadContext;
 	},
 
-	configure(app, { upgradeWebSocket }) {
-		const agentManager = appLoadContext.agents;
-		if (agentManager) {
-			app.get(
-				`${__PREFIX__}/_dial`,
-				// We need this since we cannot pass the WSEvents context
-				// Also important to not pass the callback directly
-				// since we need to retain `this` context
-				(upgradeWebSocket as UpgradeWebSocket<WebSocket>)((c) =>
-					agentManager.configureSocket(c),
-				),
-			);
-		}
-	},
 	listeningListener(info) {
 		log.info('server', 'Running on %s:%s', info.address, info.port);
 	},
+});
+
+process.on('SIGINT', () => {
+	log.info('server', 'Received SIGINT, shutting down...');
+	process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+	log.info('server', 'Received SIGTERM, shutting down...');
+	process.exit(0);
 });

@@ -1,4 +1,4 @@
-import { Computer, KeySquare } from 'lucide-react';
+import { Computer, FileKey2 } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import Code from '~/components/Code';
@@ -8,12 +8,14 @@ import Menu from '~/components/Menu';
 import Select from '~/components/Select';
 import type { User } from '~/types';
 
-export interface NewProps {
+export interface NewMachineProps {
 	server: string;
 	users: User[];
+	isDisabled?: boolean;
+	disabledKeys?: string[];
 }
 
-export default function New(data: NewProps) {
+export default function NewMachine(data: NewMachineProps) {
 	const [pushDialog, setPushDialog] = useState(false);
 	const [mkey, setMkey] = useState('');
 	const navigate = useNavigate();
@@ -25,20 +27,16 @@ export default function New(data: NewProps) {
 					<Dialog.Title>Register Machine Key</Dialog.Title>
 					<Dialog.Text className="mb-4">
 						The machine key is given when you run{' '}
-						<Code isCopyable>
-							tailscale up --login-server=
-							{data.server}
-						</Code>{' '}
-						on your device.
+						<Code isCopyable>tailscale up --login-server={data.server}</Code> on
+						your device.
 					</Dialog.Text>
-					<input type="hidden" name="_method" value="register" />
-					<input type="hidden" name="id" value="_" />
+					<input type="hidden" name="action_id" value="register" />
 					<Input
 						isRequired
 						label="Machine Key"
 						placeholder="AbCd..."
 						validationBehavior="native"
-						name="mkey"
+						name="register_key"
 						onChange={setMkey}
 					/>
 					<Select
@@ -48,12 +46,12 @@ export default function New(data: NewProps) {
 						placeholder="Select a user"
 					>
 						{data.users.map((user) => (
-							<Select.Item key={user.id}>{user.name}</Select.Item>
+						    <Select.Item key={user.id}>{user.name || user.displayName || user.email || user.id}</Select.Item>
 						))}
 					</Select>
 				</Dialog.Panel>
 			</Dialog>
-			<Menu>
+			<Menu isDisabled={data.isDisabled} disabledKeys={data.disabledKeys}>
 				<Menu.Button variant="heavy">Add Device</Menu.Button>
 				<Menu.Panel
 					onAction={(key) => {
@@ -76,7 +74,7 @@ export default function New(data: NewProps) {
 						</Menu.Item>
 						<Menu.Item key="pre-auth" textValue="Generate Pre-auth Key">
 							<div className="flex items-center gap-x-3">
-								<KeySquare className="w-4" />
+								<FileKey2 className="w-4" />
 								Generate Pre-auth Key
 							</div>
 						</Menu.Item>

@@ -1,11 +1,20 @@
 import { ActionFunctionArgs, data } from 'react-router';
 import { LoadContext } from '~/server';
-import { hp_getIntegration } from '~/utils/integration/loader';
+import { Capabilities } from '~/server/web/roles';
 
 export async function dnsAction({
 	request,
 	context,
 }: ActionFunctionArgs<LoadContext>) {
+	const check = await context.sessions.check(
+		request,
+		Capabilities.write_network,
+	);
+
+	if (!check) {
+		return data({ success: false }, 403);
+	}
+
 	if (!context.hs.writable()) {
 		return data({ success: false }, 403);
 	}
@@ -33,6 +42,8 @@ export async function dnsAction({
 			return removeRecord(formData, context);
 		case 'add_record':
 			return addRecord(formData, context);
+		case 'override_dns':
+			return overrideDns(formData, context);
 		default:
 			return data({ success: false }, 400);
 	}
@@ -51,7 +62,7 @@ async function renameTailnet(formData: FormData, context: LoadContext) {
 		},
 	]);
 
-	await hp_getIntegration()?.onConfigChange();
+	await context.integration?.onConfigChange(context.client);
 }
 
 async function toggleMagic(formData: FormData, context: LoadContext) {
@@ -67,7 +78,7 @@ async function toggleMagic(formData: FormData, context: LoadContext) {
 		},
 	]);
 
-	await hp_getIntegration()?.onConfigChange();
+	await context.integration?.onConfigChange(context.client);
 }
 
 async function removeNs(formData: FormData, context: LoadContext) {
@@ -95,12 +106,12 @@ async function removeNs(formData: FormData, context: LoadContext) {
 		await context.hs.patch([
 			{
 				path: `dns.nameservers.split."${splitName}"`,
-				value: servers,
+				value: servers.length > 0 ? servers : null,
 			},
 		]);
 	}
 
-	await hp_getIntegration()?.onConfigChange();
+	await context.integration?.onConfigChange(context.client);
 }
 
 async function addNs(formData: FormData, context: LoadContext) {
@@ -135,7 +146,7 @@ async function addNs(formData: FormData, context: LoadContext) {
 		]);
 	}
 
-	await hp_getIntegration()?.onConfigChange();
+	await context.integration?.onConfigChange(context.client);
 }
 
 async function removeDomain(formData: FormData, context: LoadContext) {
@@ -153,7 +164,7 @@ async function removeDomain(formData: FormData, context: LoadContext) {
 		},
 	]);
 
-	await hp_getIntegration()?.onConfigChange();
+	await context.integration?.onConfigChange(context.client);
 }
 
 async function addDomain(formData: FormData, context: LoadContext) {
@@ -173,7 +184,7 @@ async function addDomain(formData: FormData, context: LoadContext) {
 		},
 	]);
 
-	await hp_getIntegration()?.onConfigChange();
+	await context.integration?.onConfigChange(context.client);
 }
 
 async function removeRecord(formData: FormData, context: LoadContext) {
@@ -185,18 +196,18 @@ async function removeRecord(formData: FormData, context: LoadContext) {
 		return data({ success: false }, 400);
 	}
 
-	const records = config.dns.extra_records.filter(
-		(i) => i.name !== recordName || i.type !== recordType,
-	);
+	// Value is not needed for removal
+	const restart = await context.hs.removeDNS({
+		name: recordName,
+		type: recordType,
+		value: '',
+	});
 
-	await context.hs.patch([
-		{
-			path: 'dns.extra_records',
-			value: records,
-		},
-	]);
+	if (!restart) {
+		return;
+	}
 
-	await hp_getIntegration()?.onConfigChange();
+	await context.integration?.onConfigChange(context.client);
 }
 
 async function addRecord(formData: FormData, context: LoadContext) {
@@ -209,15 +220,32 @@ async function addRecord(formData: FormData, context: LoadContext) {
 		return data({ success: false }, 400);
 	}
 
-	const records = config.dns.extra_records;
-	records.push({ name: recordName, type: recordType, value: recordValue });
+	const restart = await context.hs.addDNS({
+		name: recordName,
+		type: recordType,
+		value: recordValue,
+	});
 
+	if (!restart) {
+		return;
+	}
+
+	await context.integration?.onConfigChange(context.client);
+}
+
+async function overrideDns(formData: FormData, context: LoadContext) {
+	const override = formData.get('override_dns')?.toString();
+	if (!override) {
+		return data({ success: false }, 400);
+	}
+
+	const overrideValue = override === 'true';
 	await context.hs.patch([
 		{
-			path: 'dns.extra_records',
-			value: records,
+			path: 'dns.override_local_dns',
+			value: overrideValue,
 		},
 	]);
 
-	await hp_getIntegration()?.onConfigChange();
+	await context.integration?.onConfigChange(context.client);
 }

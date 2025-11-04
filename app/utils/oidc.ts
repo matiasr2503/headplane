@@ -1,5 +1,5 @@
 import * as client from 'openid-client';
-import { Configuration } from 'openid-client';
+import { Configuration, IDToken, UserInfoResponse } from 'openid-client';
 import log from '~/utils/log';
 
 // We try our best to infer the callback URI of our Headplane instance
@@ -14,15 +14,15 @@ export function getRedirectUri(req: Request) {
 	}
 
 	if (!host) {
-		log.error('OIDC', 'Unable to find a host header');
-		log.error('OIDC', 'Ensure either Host or X-Forwarded-Host is set');
+		log.error('auth', 'Unable to find a host header');
+		log.error('auth', 'Ensure either Host or X-Forwarded-Host is set');
 		throw new Error('Could not determine reverse proxy host');
 	}
 
 	const proto = req.headers.get('X-Forwarded-Proto');
 	if (!proto) {
-		log.warn('OIDC', 'No X-Forwarded-Proto header found');
-		log.warn('OIDC', 'Assuming your Headplane instance runs behind HTTP');
+		log.warn('auth', 'No X-Forwarded-Proto header found');
+		log.warn('auth', 'Assuming your Headplane instance runs behind HTTP');
 	}
 
 	url.protocol = proto ?? 'http:';
@@ -33,22 +33,21 @@ export function getRedirectUri(req: Request) {
 export async function beginAuthFlow(
 	config: Configuration,
 	redirect_uri: string,
-	token_endpoint_auth_method: string,
+	scope: string,
+	extra_params: Record<string, string> = {},
 ) {
 	const codeVerifier = client.randomPKCECodeVerifier();
 	const codeChallenge = await client.calculatePKCECodeChallenge(codeVerifier);
 
 	const params: Record<string, string> = {
+		...extra_params,
+		scope,
 		redirect_uri,
-		scope: 'openid profile email',
 		code_challenge: codeChallenge,
 		code_challenge_method: 'S256',
-		token_endpoint_auth_method,
 		state: client.randomState(),
 	};
 
-	// PKCE is backwards compatible with non-PKCE servers
-	// so if we don't support it, just set our nonce
 	if (!config.serverMetadata().supportsPKCE()) {
 		params.nonce = client.randomNonce();
 	}
@@ -69,10 +68,18 @@ interface FlowOptions {
 	nonce?: string;
 }
 
+export interface FlowUser {
+	subject: string;
+	name: string;
+	email: string | undefined;
+	username: string | undefined;
+	picture: string | undefined;
+}
+
 export async function finishAuthFlow(
 	config: Configuration,
 	options: FlowOptions,
-) {
+): Promise<FlowUser> {
 	const tokens = await client.authorizationCodeGrant(
 		config,
 		new URL(options.redirect_uri),
@@ -99,9 +106,32 @@ export async function finishAuthFlow(
 		subject: user.sub,
 		name: getName(user, claims),
 		email: user.email ?? claims.email?.toString(),
-		username: user.preferred_username ?? claims.preferred_username?.toString(),
+		username: calculateUsername(claims, user),
 		picture: user.picture,
 	};
+}
+
+function calculateUsername(claims: IDToken, user: UserInfoResponse) {
+	if (user.preferred_username) {
+		return user.preferred_username;
+	}
+
+	if (
+		claims.preferred_username &&
+		typeof claims.preferred_username === 'string'
+	) {
+		return claims.preferred_username;
+	}
+
+	if (user.email) {
+		return user.email.split('@')[0];
+	}
+
+	if (claims.email && typeof claims.email === 'string') {
+		return claims.email.split('@')[0];
+	}
+
+	return;
 }
 
 function getName(user: client.UserInfoResponse, claims: client.IDToken) {
@@ -163,7 +193,7 @@ export function formatError(error: unknown) {
 		};
 	}
 
-	log.error('OIDC', 'Unknown error: %s', error);
+	log.error('auth', 'Unknown error: %s', error);
 	return {
 		code: 500,
 		error: {

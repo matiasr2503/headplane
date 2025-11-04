@@ -1,32 +1,48 @@
-import { InfoIcon } from '@primer/octicons-react';
+import { Info } from 'lucide-react';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from 'react-router';
 import { useLoaderData } from 'react-router';
 import Code from '~/components/Code';
-import { ErrorPopup } from '~/components/Error';
 import Link from '~/components/Link';
 import Tooltip from '~/components/Tooltip';
 import type { LoadContext } from '~/server';
-import type { Machine, Route, User } from '~/types';
+import { Capabilities } from '~/server/web/roles';
+import type { Machine, User } from '~/types';
 import cn from '~/utils/cn';
-import { menuAction } from './action';
-import MachineRow from './components/machine';
+import { mapNodes } from '~/utils/node-info';
+import MachineRow from './components/machine-row';
 import NewMachine from './dialogs/new';
+import { machineAction } from './machine-actions';
 
 export async function loader({
 	request,
 	context,
 }: LoaderFunctionArgs<LoadContext>) {
 	const session = await context.sessions.auth(request);
-	const [machines, routes, users] = await Promise.all([
-		context.client.get<{ nodes: Machine[] }>(
-			'v1/node',
-			session.get('api_key')!,
-		),
-		context.client.get<{ routes: Route[] }>(
-			'v1/routes',
-			session.get('api_key')!,
-		),
-		context.client.get<{ users: User[] }>('v1/user', session.get('api_key')!),
+	const user = session.user;
+	if (!user) {
+		throw new Error('Missing user session. Please log in again.');
+	}
+
+	const check = await context.sessions.check(
+		request,
+		Capabilities.read_machines,
+	);
+
+	if (!check) {
+		// Not authorized to view this page
+		throw new Error(
+			'You do not have permission to view this page. Please contact your administrator.',
+		);
+	}
+
+	const writablePermission = await context.sessions.check(
+		request,
+		Capabilities.write_machines,
+	);
+
+	const [{ nodes }, { users }] = await Promise.all([
+		context.client.get<{ nodes: Machine[] }>('v1/node', session.api_key),
+		context.client.get<{ users: User[] }>('v1/user', session.api_key),
 	]);
 
 	let magic: string | undefined;
@@ -36,20 +52,28 @@ export async function loader({
 		}
 	}
 
+	const stats = await context.agents?.lookup(nodes.map((node) => node.nodeKey));
+	const populatedNodes = mapNodes(nodes, stats);
+
 	return {
-		nodes: machines.nodes,
-		routes: routes.routes,
-		users: users.users,
+		populatedNodes,
+		nodes,
+		users,
 		magic,
 		server: context.config.headscale.url,
 		publicServer: context.config.headscale.public_url,
-		agents: context.agents?.tailnetIDs(),
-		stats: context.agents?.lookup(machines.nodes.map((node) => node.nodeKey)),
+		agent: context.agents?.agentID(),
+		writable: writablePermission,
+		preAuth: await context.sessions.check(
+			request,
+			Capabilities.generate_authkeys,
+		),
+		subject: user.subject,
 	};
 }
 
 export async function action(request: ActionFunctionArgs) {
-	return menuAction(request);
+	return machineAction(request);
 }
 
 export default function Page() {
@@ -63,14 +87,16 @@ export default function Page() {
 					<p>
 						Manage the devices connected to your Tailnet.{' '}
 						<Link
-							to="https://tailscale.com/kb/1372/manage-devices"
 							name="Tailscale Manage Devices Documentation"
+							to="https://tailscale.com/kb/1372/manage-devices"
 						>
 							Learn more
 						</Link>
 					</p>
 				</div>
 				<NewMachine
+					disabledKeys={data.preAuth ? [] : ['pre-auth']}
+					isDisabled={!data.writable}
 					server={data.publicServer ?? data.server}
 					users={data.users}
 				/>
@@ -84,7 +110,7 @@ export default function Page() {
 								<p className="uppercase text-xs font-bold">Addresses</p>
 								{data.magic ? (
 									<Tooltip>
-										<InfoIcon className="w-4 h-4" />
+										<Info className="w-4 h-4" />
 										<Tooltip.Body className="font-normal">
 											Since MagicDNS is enabled, you can access devices based on
 											their name and also at{' '}
@@ -98,7 +124,7 @@ export default function Page() {
 							</div>
 						</th>
 						{/* We only want to show the version column if there are agents */}
-						{data.agents !== undefined ? (
+						{data.agent !== undefined ? (
 							<th className="uppercase text-xs font-bold pb-2">Version</th>
 						) : undefined}
 						<th className="uppercase text-xs font-bold pb-2">Last Seen</th>
@@ -110,27 +136,22 @@ export default function Page() {
 						'border-t border-headplane-100 dark:border-headplane-800',
 					)}
 				>
-					{data.nodes.map((machine) => (
+					{data.populatedNodes.map((machine) => (
 						<MachineRow
+							isAgent={data.agent ? data.agent === machine.nodeKey : undefined}
+							isDisabled={
+								data.writable
+									? false // If the user has write permissions, they can edit all machines
+									: machine.user.providerId?.split('/').pop() !== data.subject
+							}
 							key={machine.id}
-							machine={machine}
-							routes={data.routes.filter(
-								(route) => route.node.id === machine.id,
-							)}
-							users={data.users}
 							magic={data.magic}
-							// If we pass undefined, the column will not be rendered
-							// This is useful for when there are no agents configured
-							isAgent={data.agents?.includes(machine.id)}
-							stats={data.stats?.[machine.nodeKey]}
+							node={machine}
+							users={data.users}
 						/>
 					))}
 				</tbody>
 			</table>
 		</>
 	);
-}
-
-export function ErrorBoundary() {
-	return <ErrorPopup type="embedded" />;
 }
